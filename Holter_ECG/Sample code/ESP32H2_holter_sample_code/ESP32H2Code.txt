@@ -1,0 +1,112 @@
+#include <Arduino.h>
+#include <SPI.h>
+#include <BLEDevice.h>
+#include <BLEUtils.h>
+#include <BLEServer.h>
+
+#define SPI_MISO 11
+#define SPI_MOSI 12
+#define SPI_SCLK 10
+#define SPI_CS   9
+#define DRDY_PIN 8
+
+BLEServer *pServer = NULL;
+BLECharacteristic *ecgCharacteristic;
+bool deviceConnected = false;
+
+#define ECG_SERVICE_UUID        "180D"
+#define ECG_CHARACTERISTIC_UUID "2A37"
+
+// BLE Callback
+class MyServerCallbacks: public BLEServerCallbacks {
+    void onConnect(BLEServer* pServer) {
+        deviceConnected = true;
+    };
+    void onDisconnect(BLEServer* pServer) {
+        deviceConnected = false;
+    }
+};
+
+// Initialize SPI
+void spi_init() {
+    pinMode(SPI_CS, OUTPUT);
+    digitalWrite(SPI_CS, HIGH);
+    SPI.begin(SPI_SCLK, SPI_MISO, SPI_MOSI, SPI_CS);
+}
+
+// SPI Read
+uint8_t spi_read_register(uint8_t reg) {
+    digitalWrite(SPI_CS, LOW);
+    SPI.transfer(reg | 0x80);  // Read command
+    uint8_t data = SPI.transfer(0);
+    digitalWrite(SPI_CS, HIGH);
+    return data;
+}
+
+// SPI Write
+void spi_write_register(uint8_t reg, uint8_t data) {
+    digitalWrite(SPI_CS, LOW);
+    SPI.transfer(reg);
+    SPI.transfer(data);
+    digitalWrite(SPI_CS, HIGH);
+}
+
+// Initialize ADS1293
+void ads1293_init() {
+    spi_write_register(0x00, 0x01); // Reset ADS1293
+    delay(100);
+    spi_write_register(0x01, 0x03); // Enable ECG channels
+    spi_write_register(0x02, 0x10); // Set sample rate
+    spi_write_register(0x03, 0x07); // Gain settings
+    spi_write_register(0x04, 0x01); // Enable lead-off detection
+}
+
+// Read ECG Data
+void ads1293_read_data(uint8_t *ecg_data) {
+    ecg_data[0] = spi_read_register(0x20); // ECG channel 1
+    ecg_data[1] = spi_read_register(0x21); // ECG channel 2
+    ecg_data[2] = spi_read_register(0x22); // ECG channel 3
+}
+
+// Initialize BLE
+void ble_init() {
+    BLEDevice::init("ESP32H2_ECG");
+    pServer = BLEDevice::createServer();
+    pServer->setCallbacks(new MyServerCallbacks());
+
+    BLEService *pService = pServer->createService(ECG_SERVICE_UUID);
+    ecgCharacteristic = pService->createCharacteristic(
+                        ECG_CHARACTERISTIC_UUID,
+                        BLECharacteristic::PROPERTY_READ |
+                        BLECharacteristic::PROPERTY_NOTIFY
+                    );
+
+    pService->start();
+    BLEAdvertising *pAdvertising = BLEDevice::getAdvertising();
+    pAdvertising->addServiceUUID(ECG_SERVICE_UUID);
+    pAdvertising->start();
+}
+
+// Main Setup
+void setup() {
+    Serial.begin(115200);
+    spi_init();
+    ads1293_init();
+    ble_init();
+    pinMode(DRDY_PIN, INPUT);
+}
+
+// Main Loop
+void loop() {
+    if (digitalRead(DRDY_PIN) == LOW) {  // New ECG data ready
+        uint8_t ecg_data[3];
+        ads1293_read_data(ecg_data);
+        Serial.printf("ECG: %02X %02X %02X\n", ecg_data[0], ecg_data[1], ecg_data[2]);
+
+        if (deviceConnected) {
+            ecgCharacteristic->setValue(ecg_data, 3);
+            ecgCharacteristic->notify();
+        }
+    }
+    delay(10);  // Small delay to reduce CPU usage
+}
