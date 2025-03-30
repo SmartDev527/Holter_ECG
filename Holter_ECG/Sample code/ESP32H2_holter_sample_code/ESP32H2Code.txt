@@ -110,3 +110,85 @@ void loop() {
     }
     delay(10);  // Small delay to reduce CPU usage
 }
+
+
+
+
+
+
+
+
+/**** Power Optimization ******/
+//     Enable deep sleep
+esp_sleep_enable_timer_wakeup(5000000);  // Sleep for 5 seconds
+esp_deep_sleep_start();
+// Reduce ADS1293 power consumption
+spi_write_register(0x01, 0x00); // Put ADS1293 in low-power mode
+
+/** Digital Filtering Using DSP **/
+
+// Removes baseline drift (frequencies below 0.5 Hz).
+
+#define HPF_ALPHA 0.99  // Smoothing factor (0.9 - 0.99 recommended)
+
+float previousECG = 0;
+float highPassFilter(float input) {
+    float output = HPF_ALPHA * (previousECG + input - previousECG);
+    previousECG = output;
+    return output;
+}
+
+// Implement Low-Pass Filter
+// Removes muscle noise (frequencies above 40 Hz).
+#define LPF_ALPHA 0.1  // Smoothing factor
+
+float previousLPF = 0;
+float lowPassFilter(float input) {
+    float output = LPF_ALPHA * input + (1 - LPF_ALPHA) * previousLPF;
+    previousLPF = output;
+    return output;
+}
+
+
+// Implement Notch Filter (50/60Hz)
+#define NOTCH_FREQ 50 // Set to 60 if using 60Hz power supply
+#define SAMPLE_RATE 200 // ECG sampling rate in Hz
+
+float notchFilter(float input) {
+    static float y[3] = {0};
+    static float x[3] = {0};
+    
+    // Notch filter coefficients (for 50Hz at 200Hz sample rate)
+    float b0 = 0.9726, b1 = -1.9070, b2 = 0.9726;
+    float a1 = -1.9070, a2 = 0.9453;
+
+    x[0] = input;
+    y[0] = b0*x[0] + b1*x[1] + b2*x[2] - a1*y[1] - a2*y[2];
+
+    x[2] = x[1];
+    x[1] = x[0];
+    y[2] = y[1];
+    y[1] = y[0];
+
+    return y[0];
+}
+
+
+
+void ads1293_read_data(uint8_t *ecg_data) {
+    ecg_data[0] = spi_read_register(0x20);
+    ecg_data[1] = spi_read_register(0x21);
+    ecg_data[2] = spi_read_register(0x22);
+    
+    // Convert raw data to float ECG value
+    float rawECG = (ecg_data[0] << 16 | ecg_data[1] << 8 | ecg_data[2]) / 1000000.0;
+    
+    // Apply filters
+    float filteredECG = highPassFilter(rawECG);
+    filteredECG = lowPassFilter(filteredECG);
+    filteredECG = notchFilter(filteredECG);
+
+    Serial.printf("ECG Filtered: %f\n", filteredECG);
+}
+
+
